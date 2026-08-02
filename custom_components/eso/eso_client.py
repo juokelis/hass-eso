@@ -488,7 +488,7 @@ class ESOClient:
 
     def fetch_dataset_range(
         self, obj: str, date_from: datetime, date_to: datetime
-    ) -> dict | None:
+    ) -> dict:
         """Fetch hourly data for an arbitrary date range (history backfill).
 
         Uses the form's "Kita" (custom) period, which returns the whole range

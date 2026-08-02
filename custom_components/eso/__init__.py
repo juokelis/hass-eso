@@ -314,8 +314,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
                 await async_import_generation(now, retry=retry + 1)
 
             entry.async_on_unload(async_call_later(hass, retry_delay, _retry))
-        elif all_failed:
+        elif all_failed and date_from is None:
             _LOGGER.error("Fetch failed, postponing fetch for next day")
+        elif all_failed:
+            _LOGGER.error("Backfill import failed")
 
     daily_import_cancel = None
 
