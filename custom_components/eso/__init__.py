@@ -365,9 +365,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 raise ServiceValidationError(
                     f"Unknown ESO config entry id(s): {', '.join(unknown)}"
                 )
-            targets = [by_id[eid].runtime_data.async_import for eid in entry_ids]
+            target_entries = [by_id[eid] for eid in entry_ids]
         else:
-            targets = [entry.runtime_data.async_import for entry in entries]
+            target_entries = entries
+        targets = [entry.runtime_data.async_import for entry in target_entries]
         if not targets:
             raise ServiceValidationError("No ESO accounts are configured")
         date_from = call.data.get(ATTR_DATE_FROM)
@@ -378,9 +379,20 @@ def _async_register_services(hass: HomeAssistant) -> None:
             raise ServiceValidationError("date_from must not be after date_to")
         kwargs = {}
         if date_from:
+            if any(
+                entry.data.get(CONF_PROVIDER, DEFAULT_PROVIDER) == PROVIDER_IGNITIS
+                for entry in target_entries
+            ):
+                raise ServiceValidationError(
+                    "Backfill (date_from/date_to) is not supported for Ignitis accounts"
+                )
             kwargs = {
-                "date_from": datetime.combine(date_from, datetime.min.time()),
-                "date_to": datetime.combine(date_to, datetime.min.time())
+                "date_from": datetime.combine(
+                    date_from, datetime.min.time(), tzinfo=dt_util.DEFAULT_TIME_ZONE
+                ),
+                "date_to": datetime.combine(
+                    date_to, datetime.min.time(), tzinfo=dt_util.DEFAULT_TIME_ZONE
+                )
                 if date_to
                 else None,
             }
