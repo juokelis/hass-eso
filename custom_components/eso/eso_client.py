@@ -18,6 +18,16 @@ LOGIN_URL = "https://mano.eso.lt/?destination=/consumption"
 GENERATION_URL = "https://mano.eso.lt/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
 TFA_FORM_ID = "gpc_tfa_login_auth_form"
 CONSUMPTION_FORM_ID = "eso_consumption_history_form"
+BASE_URL = "https://mano.eso.lt"
+# Accounts that only received access to an object through ESO's access-rights
+# sharing ("atstovavimas") land on a profile with no objects of its own; the
+# consumption page then shows "Objektas nerastas" until the session is
+# switched to the granting profile. The switch is a plain GET link carrying a
+# session-bound CSRF token. ESO renders the account menu inside JSON-escaped
+# AJAX payloads, so the pattern tolerates escaped slashes.
+PROFILE_SWITCH_RE = re.compile(
+    r"access-rights(?:\\/|/)(\d+)(?:\\/|/)switch-to\?token=([A-Za-z0-9_\-\.~%]+)"
+)
 
 class ESOError(Exception):
     """Base error for ESO client failures."""
@@ -58,6 +68,7 @@ class ESOClient:
         self.cookies: dict | None = None
         self.form_parser: FormParser = FormParser()
         self.dataset: dict = {}
+        self._last_page_html: str = ""
 
     @staticmethod
     def _new_session() -> requests.Session:
@@ -160,13 +171,58 @@ class ESOClient:
     def _open_consumption(self) -> bool:
         """GET the consumption page with the current session and parse its
         Drupal form tokens. Returns True when the session is authenticated
-        (i.e. the consumption form is present rather than the login form)."""
+        (i.e. the consumption form is present rather than the login form).
+
+        When the form is missing but the session offers an access-rights
+        profile switch link, follow it once and retry: the account itself may
+        have no objects, with the real objects living on a profile shared
+        with it via ESO access rights (delegated account)."""
+        if self._load_consumption_form():
+            return True
+        if self._switch_profile():
+            return self._load_consumption_form()
+        return False
+
+    def _load_consumption_form(self) -> bool:
         self.form_parser = FormParser()
         response = self.session.get(LOGIN_URL, allow_redirects=True)
         response.raise_for_status()
         self.cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
+        self._last_page_html = response.text
         self.form_parser.feed(response.text)
         return self.form_parser.get("form_id") == CONSUMPTION_FORM_ID
+
+    def _switch_profile(self) -> bool:
+        """Follow the first access-rights profile switch link offered to the
+        session, looking first at the last fetched page and falling back to
+        the /access-rights management page. Returns True when a switch link
+        was found and requested."""
+        match = PROFILE_SWITCH_RE.search(self._last_page_html or "")
+        if not match:
+            try:
+                page = self.session.get(
+                    BASE_URL + "/access-rights", allow_redirects=True
+                )
+                page.raise_for_status()
+            except requests.exceptions.RequestException as err:
+                _LOGGER.debug("ESO: /access-rights request failed: %s", err)
+                return False
+            match = PROFILE_SWITCH_RE.search(page.text)
+            if not match:
+                return False
+        url = "%s/access-rights/%s/switch-to?token=%s" % (
+            BASE_URL,
+            match.group(1),
+            match.group(2),
+        )
+        _LOGGER.info(
+            "ESO: consumption form not found, switching to delegated profile"
+            " (access right %s)",
+            match.group(1),
+        )
+        response = self.session.get(url, allow_redirects=True)
+        response.raise_for_status()
+        return True
 
     def _full_login(self) -> None:
         """Submit the username/password form. ESO redirects to the TFA page
