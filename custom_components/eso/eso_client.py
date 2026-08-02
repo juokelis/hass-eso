@@ -14,11 +14,11 @@ from .objects_parser import (
     clean_object_name,
 )
 
-LOGIN_URL = "https://mano.eso.lt/?destination=/consumption"
-GENERATION_URL = "https://mano.eso.lt/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
+BASE_URL = "https://mano.eso.lt"
+LOGIN_URL = BASE_URL + "/?destination=/consumption"
+GENERATION_URL = BASE_URL + "/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
 TFA_FORM_ID = "gpc_tfa_login_auth_form"
 CONSUMPTION_FORM_ID = "eso_consumption_history_form"
-BASE_URL = "https://mano.eso.lt"
 # Accounts that only received access to an object through ESO's access-rights
 # sharing ("atstovavimas") land on a profile with no objects of its own; the
 # consumption page then shows "Objektas nerastas" until the session is
@@ -190,7 +190,12 @@ class ESOClient:
         self.cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
         self._last_page_html = response.text
         self.form_parser.feed(response.text)
-        return self.form_parser.get("form_id") == CONSUMPTION_FORM_ID
+        result = self.form_parser.get("form_id") == CONSUMPTION_FORM_ID
+        _LOGGER.debug("ESO: Consumption form detected: %s", result)
+        if not result:
+            _LOGGER.debug("ESO: Consumption page HTML (first 1000 chars): %s", response.text[:1000])
+            _LOGGER.debug("ESO: All forms found: %s", self.form_parser.forms)
+        return result
 
     def _switch_profile(self) -> bool:
         """Follow the first access-rights profile switch link offered to the
@@ -265,6 +270,8 @@ class ESOClient:
             allow_redirects=True,
         )
         submit.raise_for_status()
+        _LOGGER.debug("ESO: TFA Submit response URL: %s", submit.url)
+        _LOGGER.debug("ESO: TFA Submit HTML sample: %s", submit.text[:500])
 
     @staticmethod
     def _extract_tfa_build_id(html: str) -> str | None:
