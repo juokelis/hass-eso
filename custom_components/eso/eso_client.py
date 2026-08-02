@@ -14,11 +14,11 @@ from .objects_parser import (
     clean_object_name,
 )
 
-LOGIN_URL = "https://mano.eso.lt/?destination=/consumption"
-GENERATION_URL = "https://mano.eso.lt/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
+BASE_URL = "https://mano.eso.lt"
+LOGIN_URL = BASE_URL + "/?destination=/consumption"
+GENERATION_URL = BASE_URL + "/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
 TFA_FORM_ID = "gpc_tfa_login_auth_form"
 CONSUMPTION_FORM_ID = "eso_consumption_history_form"
-BASE_URL = "https://mano.eso.lt"
 # Accounts that only received access to an object through ESO's access-rights
 # sharing ("atstovavimas") land on a profile with no objects of its own; the
 # consumption page then shows "Objektas nerastas" until the session is
@@ -190,7 +190,12 @@ class ESOClient:
         self.cookies = requests.utils.dict_from_cookiejar(self.session.cookies)
         self._last_page_html = response.text
         self.form_parser.feed(response.text)
-        return self.form_parser.get("form_id") == CONSUMPTION_FORM_ID
+        result = self.form_parser.get("form_id") == CONSUMPTION_FORM_ID
+        _LOGGER.debug("ESO: Consumption form detected: %s", result)
+        if not result:
+            _LOGGER.debug("ESO: Consumption page HTML (first 1000 chars): %s", response.text[:1000])
+            _LOGGER.debug("ESO: All forms found: %s", self.form_parser.forms)
+        return result
 
     def _switch_profile(self) -> bool:
         """Follow the first access-rights profile switch link offered to the
@@ -265,6 +270,8 @@ class ESOClient:
             allow_redirects=True,
         )
         submit.raise_for_status()
+        _LOGGER.debug("ESO: TFA Submit response URL: %s", submit.url)
+        _LOGGER.debug("ESO: TFA Submit HTML sample: %s", submit.text[:500])
 
     @staticmethod
     def _extract_tfa_build_id(html: str) -> str | None:
@@ -423,7 +430,13 @@ class ESOClient:
         self.session.cookies = requests.utils.cookiejar_from_dict(jar)
         return True
 
-    def fetch(self, obj: str, date: datetime, stored: bool = False) -> dict:
+    def fetch(
+        self,
+        obj: str,
+        date: datetime,
+        date_range: tuple[datetime, datetime] | None = None,
+        stored: bool = False,
+    ) -> dict:
         if not self.cookies:
             _LOGGER.error("Cookies are empty. Check your credentials.")
             return {}
@@ -452,6 +465,13 @@ class ESOClient:
             "_drupal_ajax": "1",
             "_triggering_element_name": "display_type",
         }
+        if date_range is not None:
+            # The weekly view ignores active_date_value and always renders the
+            # last 7 days; the "Kita" (custom) period is the only server-side
+            # path to historical hourly data.
+            data["period"] = "other"
+            data["other_start"] = date_range[0].strftime("%Y-%m-%d")
+            data["other_end"] = date_range[1].strftime("%Y-%m-%d")
         if stored:
             # The "Rodyti sukauptos energijos kiekį" (show stored energy)
             # checkbox only renders in the monthly view; it adds a `stored`
@@ -479,7 +499,31 @@ class ESOClient:
         if obj in self.dataset:
             return self.dataset[obj]
         self.dataset[obj] = {}
-        data = self.fetch(obj, date)
+        self._merge_response(obj, self.fetch(obj, date))
+        return self.dataset[obj]
+
+    def fetch_dataset_range(
+        self, obj: str, date_from: datetime, date_to: datetime
+    ) -> dict:
+        """Fetch hourly data for an arbitrary date range (history backfill).
+
+        Uses the form's "Kita" (custom) period, which returns the whole range
+        hourly in one response; very long ranges are split into ~90-day
+        requests. The merged series is sorted chronologically because the
+        statistics writer builds cumulative sums in iteration order."""
+        self.dataset[obj] = {}
+        start = date_from
+        while start <= date_to:
+            end = min(start + timedelta(days=89), date_to)
+            self._merge_response(obj, self.fetch(obj, end, date_range=(start, end)))
+            start = end + timedelta(days=1)
+            if start <= date_to:
+                time.sleep(1)
+        for consumption_type, series in self.dataset[obj].items():
+            self.dataset[obj][consumption_type] = dict(sorted(series.items()))
+        return self.dataset[obj]
+
+    def _merge_response(self, obj: str, data: dict) -> None:
         for d in data:
             if d.get("command") == "update_build_id":
                 self.form_parser.set("form_build_id", d["new"])
@@ -493,8 +537,7 @@ class ESOClient:
                 consumption_type = dataset["key"]
                 if consumption_type not in self.dataset[obj]:
                     self.dataset[obj][consumption_type] = {}
-                self.dataset[obj][consumption_type] = self.parse_dataset(dataset)
-        return self.dataset[obj]
+                self.dataset[obj][consumption_type].update(self.parse_dataset(dataset))
 
     def fetch_stored(self, obj: str) -> dict[str, float]:
         """Return the storage-bank balance ESO reports for each month.

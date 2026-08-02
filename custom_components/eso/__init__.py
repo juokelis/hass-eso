@@ -34,7 +34,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
-    ATTR_DATE,
+    ATTR_DATE_FROM,
+    ATTR_DATE_TO,
     CONF_CONSUMED,
     CONF_COST,
     CONF_EXPORT_BALANCE,
@@ -133,7 +134,11 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 SERVICE_IMPORT_NOW_SCHEMA = vol.Schema(
-    {vol.Optional(ATTR_CONFIG_ENTRY_ID): vol.All(cv.ensure_list, [cv.string]), vol.Optional(ATTR_DATE): cv.datetime}
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_DATE_FROM): cv.date,
+        vol.Optional(ATTR_DATE_TO): cv.date,
+    }
 )
 
 
@@ -250,7 +255,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
     )
     max_retries = IGNITIS_MAX_RETRIES if provider == PROVIDER_IGNITIS else 1
 
-    async def async_import_generation(now: datetime, retry: int = 0) -> None:
+    async def async_import_generation(
+        now: datetime,
+        retry: int = 0,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> None:
         if hass.is_stopping:
             _LOGGER.debug("HA is stopping, skipping generation import")
             return
@@ -269,7 +279,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
         for obj in objects if not auth_failed else []:
             _LOGGER.info("Fetching ESO dataset [%s]", obj[CONF_NAME])
             try:
-                await hass.async_add_executor_job(client.fetch_dataset, obj[CONF_ID], now)
+                if date_from is not None:
+                    await hass.async_add_executor_job(
+                        client.fetch_dataset_range,
+                        obj[CONF_ID],
+                        date_from,
+                        date_to or now,
+                    )
+                else:
+                    await hass.async_add_executor_job(client.fetch_dataset, obj[CONF_ID], now)
             except ESOAuthError as err:
                 _LOGGER.error("Authentication failed for %s: %s. Reconfigure the integration to update credentials.", obj[CONF_NAME], err)
                 auth_failed = True
@@ -309,7 +327,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
             _LOGGER.info("Import completed for %s", obj[CONF_NAME])
         if auth_failed:
             return
-        if all_failed and retry < max_retries:
+        # Range (backfill) imports are user-invoked one-offs — no silent retry.
+        if all_failed and retry < max_retries and date_from is None:
             retry_at = dt_util.now() + timedelta(seconds=retry_delay)
             _LOGGER.warning("Fetch failed, will retry at %s (attempt %d/%d)", retry_at.isoformat(), retry + 1, max_retries)
 
@@ -317,8 +336,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
                 await async_import_generation(now, retry=retry + 1)
 
             entry.async_on_unload(async_call_later(hass, retry_delay, _retry))
-        elif all_failed:
+        elif all_failed and date_from is None:
             _LOGGER.error("Fetch failed, postponing fetch for next day")
+        elif all_failed:
+            _LOGGER.error("Backfill import failed")
 
     daily_import_cancel = None
 
@@ -369,19 +390,40 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 raise ServiceValidationError(
                     f"Unknown ESO config entry id(s): {', '.join(unknown)}"
                 )
-            targets = [by_id[eid].runtime_data.async_import for eid in entry_ids]
+            target_entries = [by_id[eid] for eid in entry_ids]
         else:
-            targets = [entry.runtime_data.async_import for entry in entries]
+            target_entries = entries
+        targets = [entry.runtime_data.async_import for entry in target_entries]
         if not targets:
             raise ServiceValidationError("No ESO accounts are configured")
-        reference = call.data.get(ATTR_DATE)
-        if reference is None:
-            reference = dt_util.now()
-        elif reference.tzinfo is None:
-            reference = reference.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-        _LOGGER.info("ESO: on-demand import requested for %d account(s) as of %s", len(targets), reference.isoformat())
+        date_from = call.data.get(ATTR_DATE_FROM)
+        date_to = call.data.get(ATTR_DATE_TO)
+        if date_to and not date_from:
+            raise ServiceValidationError("date_to requires date_from")
+        if date_from and date_to and date_from > date_to:
+            raise ServiceValidationError("date_from must not be after date_to")
+        kwargs = {}
+        if date_from:
+            if any(
+                entry.data.get(CONF_PROVIDER, DEFAULT_PROVIDER) == PROVIDER_IGNITIS
+                for entry in target_entries
+            ):
+                raise ServiceValidationError(
+                    "Backfill (date_from/date_to) is not supported for Ignitis accounts"
+                )
+            kwargs = {
+                "date_from": datetime.combine(
+                    date_from, datetime.min.time(), tzinfo=dt_util.DEFAULT_TIME_ZONE
+                ),
+                "date_to": datetime.combine(
+                    date_to, datetime.min.time(), tzinfo=dt_util.DEFAULT_TIME_ZONE
+                )
+                if date_to
+                else None,
+            }
+        _LOGGER.info("ESO: on-demand import requested for %d account(s)", len(targets))
         for callback in targets:
-            await callback(reference)
+            await callback(dt_util.now(), **kwargs)
 
     hass.services.async_register(
         DOMAIN,

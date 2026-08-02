@@ -78,6 +78,7 @@ def signal_stored_updated(entry_id: str) -> str:
 # Service to trigger an on-demand import
 SERVICE_IMPORT_NOW = "import_now"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
-# Optional reference date for the import (defaults to now); use it to backfill a
-# past day. Providers import relative to this date exactly as the daily run does.
-ATTR_DATE = "date"
+# Optional backfill range for the import; when set, the import fetches the whole
+# [date_from, date_to] range instead of the usual daily window.
+ATTR_DATE_FROM = "date_from"
+ATTR_DATE_TO = "date_to"
