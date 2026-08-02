@@ -309,7 +309,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
                 await async_insert_fixed_price_cost_statistics(hass, obj, dataset)
             if obj.get(CONF_EXPORT_BALANCE):
                 await async_insert_export_balance_statistics(hass, obj, dataset)
-            if obj.get(CONF_RETURNED):
+            # Storage bank is an ESO portal feature; IgnitisClient has no fetch_stored
+            if obj.get(CONF_RETURNED) and hasattr(client, "fetch_stored"):
                 try:
                     stored = await hass.async_add_executor_job(
                         client.fetch_stored, obj[CONF_ID]

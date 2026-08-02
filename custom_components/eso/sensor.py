@@ -90,8 +90,17 @@ class ESOStoredBankSensor(RestoreSensor):
             for month, value in series.items()
             if bank_year_start <= month < current_month
         }
+        if not closed:
+            # April: current bank year has no closed month yet; the previous
+            # bank year's balance is still the real one until ESO closes April.
+            prev_start = f"{int(bank_year_start[:4]) - 1}-04"
+            closed = {
+                month: value
+                for month, value in series.items()
+                if prev_start <= month < bank_year_start
+            }
         last_month = max(closed) if closed else None
-        self._attr_native_value = closed[last_month] if last_month else 0.0
+        self._attr_native_value = closed[last_month] if last_month else None
         self._attr_extra_state_attributes = {
             "month": last_month,
             "series": series,
