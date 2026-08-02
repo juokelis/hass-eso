@@ -70,6 +70,11 @@ IGNITIS_MAX_RETRIES = 10
 # Subentry type: one metering point (object) per subentry
 SUBENTRY_TYPE_OBJECT = "object"
 
+# Dispatcher signal fired after the stored-bank series is refreshed
+def signal_stored_updated(entry_id: str) -> str:
+    return f"{DOMAIN}_{entry_id}_stored_updated"
+
+
 # Service to trigger an on-demand import
 SERVICE_IMPORT_NOW = "import_now"
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"

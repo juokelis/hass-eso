@@ -1,7 +1,7 @@
 import logging
 import random
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 import homeassistant.helpers.config_validation as cv
@@ -27,6 +27,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_point_in_time
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
@@ -72,11 +73,15 @@ from .const import (
     SESSION_FILE,
     SUBENTRY_TYPE_OBJECT,
     TIMEZONE,
+    signal_stored_updated,
 )
 from .eso_client import ESOAuthError, ESOClient
 from .ignitis_client import IgnitisClient
 
 _LOGGER = logging.getLogger(__name__)
+
+PLATFORMS = ["sensor"]
+
 
 
 @dataclass
@@ -85,6 +90,8 @@ class ESORuntimeData:
 
     client: ESOClient | IgnitisClient
     async_import: Callable[[datetime], Awaitable[None]]
+    # Latest storage-bank series per object id: {"YYYY-MM": kWh at month end}
+    stored: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 type ESOConfigEntry = ConfigEntry[ESORuntimeData]
@@ -302,6 +309,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
                 await async_insert_fixed_price_cost_statistics(hass, obj, dataset)
             if obj.get(CONF_EXPORT_BALANCE):
                 await async_insert_export_balance_statistics(hass, obj, dataset)
+            # Storage bank is an ESO portal feature; IgnitisClient has no fetch_stored
+            if obj.get(CONF_RETURNED) and hasattr(client, "fetch_stored"):
+                try:
+                    stored = await hass.async_add_executor_job(
+                        client.fetch_stored, obj[CONF_ID]
+                    )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error(
+                        "ESO stored-bank fetch error [%s]: %s", obj[CONF_NAME], err
+                    )
+                else:
+                    if stored:
+                        entry.runtime_data.stored[obj[CONF_ID]] = stored
+                        async_dispatcher_send(
+                            hass, signal_stored_updated(entry.entry_id)
+                        )
             _LOGGER.info("Import completed for %s", obj[CONF_NAME])
         if auth_failed:
             return
@@ -348,6 +371,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
         client=client,
         async_import=async_import_generation,
     )
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _async_register_services(hass)
     return True
 
@@ -412,6 +436,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ESOConfigEntry) -> bool:
     """Unload a config entry (scheduling is torn down via async_on_unload)."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     remaining = [
         other
         for other in hass.config_entries.async_loaded_entries(DOMAIN)
