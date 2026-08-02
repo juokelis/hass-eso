@@ -14,11 +14,11 @@ from .objects_parser import (
     clean_object_name,
 )
 
-LOGIN_URL = "https://mano.eso.lt/?destination=/consumption"
-GENERATION_URL = "https://mano.eso.lt/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
+BASE_URL = "https://mano.eso.lt"
+LOGIN_URL = BASE_URL + "/?destination=/consumption"
+GENERATION_URL = BASE_URL + "/consumption?ajax_form=1&_wrapper_format=drupal_ajax"
 TFA_FORM_ID = "gpc_tfa_login_auth_form"
 CONSUMPTION_FORM_ID = "eso_consumption_history_form"
-BASE_URL = "https://mano.eso.lt"
 # Accounts that only received access to an object through ESO's access-rights
 # sharing ("atstovavimas") land on a profile with no objects of its own; the
 # consumption page then shows "Objektas nerastas" until the session is
