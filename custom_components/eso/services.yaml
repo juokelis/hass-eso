@@ -6,8 +6,13 @@ import_now:
       selector:
         config_entry:
           integration: eso
-    date:
+    date_from:
       required: false
-      example: "2026-06-01 00:00:00"
+      example: "2026-01-01"
       selector:
-        datetime:
+        date:
+    date_to:
+      required: false
+      example: "2026-07-16"
+      selector:
+        date:
